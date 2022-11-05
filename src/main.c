@@ -7,11 +7,32 @@
 #include <libgen.h>
 #include <windows.h>
 
-const char* OUT_EXTS[3] = {
+const char* OUT_EXTS[4] = {
     ".ply",
     ".obj",
-    ".ply"
+    ".ply",
+    ".export.mesh"
 };
+
+enum OUTPUT_MODE {
+    OUTPUT_PLY,
+    OUTPUT_OBJ,
+    OUTPUT_MULTI_PLY,
+    OUTPUT_STORMWORKS,
+    OUTPUT_STDOUT,
+    OUTPUT_NONE
+};
+
+const char* IN_EXTS[1] = {
+    ".mesh",
+    // ".obj"
+};
+
+enum INPUT_MODE {
+    INPUT_MESH,
+    // INPUT_OBJ
+};
+
 const char* SIGNATURE = "mesh";
 const char* SHADER_TYPES[4] = {
     "opaque",
@@ -67,15 +88,7 @@ void freemesh(mesh* m) {
     m->submeshes = NULL;
 }
 
-enum OUTPUT_MODE {
-    OUTPUT_PLY,
-    OUTPUT_OBJ,
-    OUTPUT_MULTI_PLY,
-    OUTPUT_STDOUT,
-    OUTPUT_NONE
-};
-
-void chgfname(char* name, int mode) {
+int chgfname(char* name, int mode) {
     memcpy(strstr(name, ".mesh"), OUT_EXTS[mode], strlen(OUT_EXTS[mode]) + 1);
 }
 
@@ -94,6 +107,12 @@ char* readbytes(char* filename, size_t* len) {
     return buf;
 }
 
+// TODO: Assimp OBJ file reading
+mesh readobj(char* fbytes) {
+
+}
+
+// Writes `m`m to `destfd` in wavefront OBJ format
 // TODO: OBJ Submesh export
 int writeobj(mesh m, FILE* destfd) {
     FILE* obj = destfd;
@@ -104,7 +123,10 @@ int writeobj(mesh m, FILE* destfd) {
 
     // Vertices
     for (int v = 0; v < m.n_vertices; ++v) {
-        fprintf(obj, "v %f %f %f\n", m.vertices[v].x, m.vertices[v].y, m.vertices[v].z);
+        fprintf(obj, "v %f %f %f %f %f %f\n",
+            m.vertices[v].x, m.vertices[v].y, m.vertices[v].z,
+            (float)m.vertices[v].r / 255.0f, (float)m.vertices[v].g / 255.0f, (float)m.vertices[v].b / 255.0f
+        );
     }
 
     // Normals
@@ -124,6 +146,7 @@ int writeobj(mesh m, FILE* destfd) {
     return 0;
 }
 
+// Writes `m` to `destfd` in stanford PLY format with vertex colors
 int writeply(mesh m, FILE* destfd) {
     FILE* ply = destfd;
 
@@ -153,7 +176,7 @@ int writeply(mesh m, FILE* destfd) {
     return 0;
 }
 
-// Write the basic data, in a human-readable format to STDOUT
+// Write basic data of `m`, in a human-readable format to STDOUT
 int writestdout(mesh m) {
     printf("--BEGIN MESH OUTPUT--\n");
 
@@ -180,6 +203,7 @@ int writestdout(mesh m) {
             m.triangles[t].c
         );
     }
+
     printf("%d SUBMESHES\n", m.n_submeshes);
     for (int s = 0; s < m.n_submeshes; ++s) {
         submesh sm = m.submeshes[s];
@@ -197,6 +221,17 @@ int writestdout(mesh m) {
     return 0;
 }
 
+// TODO: Phys file import
+mesh loadphys(char* fbytes) {
+
+}
+
+// TODO: Phys file export
+int writephys(mesh m, FILE* destfd) {
+
+}
+
+// Loads the mesh data stored in `fbytes` (encoded in Stormworks .mesh format) 
 mesh loadmesh(char* fbytes) {
     int cursor = 8; // skip the first 8 bytes "mesh" + 4 header
 
@@ -273,7 +308,73 @@ mesh loadmesh(char* fbytes) {
     return m;
 }
 
-int cvtmesh(char* srcfile, char* destfile, int output_mode) {
+// Writes `m` to destfd in Stormworks .mesh format
+int writemesh(mesh m, FILE* destfd) {
+    // Header
+    fwrite("mesh\x07\x00\x01\x00", 8, 1, destfd);
+
+    // Vertex count (2b)
+    uint16_t vertn = m.n_vertices;
+    fwrite(&vertn, 1, sizeof(uint16_t), destfd);
+
+    // Unknown (4b)
+    fwrite("\x13\x00\x00\x00", 4, 1, destfd);
+
+    // Vertices
+    fwrite(m.vertices, m.n_vertices, sizeof(vertex), destfd);
+
+    // Triangle count (4b) (n_triangles * 3)
+    uint32_t trin = m.n_triangles * 3;
+    fwrite(&trin, 1, sizeof(uint32_t), destfd);
+
+    // "Edge buffer" (triangles)
+    fwrite(m.triangles, m.n_triangles, sizeof(triangle), destfd);
+
+    // Submesh count
+    uint16_t smct = m.n_submeshes;
+    fwrite(&smct, 1, sizeof(uint16_t), destfd);
+
+    for (int s = 0; s < m.n_submeshes; ++s) {
+        submesh sm = m.submeshes[s];
+
+        // Vertices start (4b)
+        fwrite(&sm.start_index, 1, sizeof(uint32_t), destfd);
+
+        // Vertices count (4b)
+        fwrite(&sm.vertex_count, 1, sizeof(uint32_t), destfd);
+
+        // Unknown (2b)
+        fwrite("\x00\x00", 2, 1, destfd);
+
+        // Shader type (2b)
+        fwrite(&sm.shadertype, 1, sizeof(uint16_t), destfd);
+
+        // Cullmin (3x4b)
+        fwrite(sm.cullmin, 3, sizeof(float), destfd);
+
+        // Cullmax (3x4b)
+        fwrite(sm.cullmax, 3, sizeof(float), destfd);
+
+        // Unknown (2b)
+        fwrite("\x00\x00", 2, 1, destfd);
+
+        uint16_t len = strlen(sm.id);
+        // Submesh ID (2b+data)
+        fwrite(&len, 1, sizeof(uint16_t), destfd);
+        fprintf(destfd, "%s", sm.id);
+
+        // 3 unknown floats (3x4b)
+        fwrite("\x00\x00\x80\x3F\x00\x00\x80\x3F\x00\x00\x80\x3F", 3, 4, destfd);
+    }
+
+    fwrite("\x00\x00", 2, 1, destfd);
+
+    fflush(destfd);
+
+    return 0;
+}
+
+int cvtmesh(char* srcfile, char* destfile, int input_mode, int output_mode) {
     char* meshbytes;
     int err = 0;
     mesh m;
@@ -286,8 +387,10 @@ int cvtmesh(char* srcfile, char* destfile, int output_mode) {
         goto exit;
     }
 
-    m = loadmesh(meshbytes);
-    free(meshbytes);
+    if (input_mode == INPUT_MESH)
+        m = loadmesh(meshbytes);
+    // else if (input_mode == INPUT_OBJ)
+    //     m = readobj(meshbytes);
 
     printf("Mesh loaded with %d vertices and %d faces\n", m.n_vertices, m.n_triangles);
 
@@ -334,7 +437,7 @@ int cvtmesh(char* srcfile, char* destfile, int output_mode) {
         free(buf);
         free(outdir);
     } else {
-        FILE* outfile = fopen(destfile, "w");
+        FILE* outfile = fopen(destfile, output_mode == OUTPUT_STORMWORKS ? "wb" : "w");
         if (outfile == NULL) {
             err = 2;
             goto exit;
@@ -344,24 +447,22 @@ int cvtmesh(char* srcfile, char* destfile, int output_mode) {
             err = writeply(m, outfile);
         else if (output_mode == OUTPUT_OBJ)
             err = writeobj(m, outfile);
+        else if (output_mode == OUTPUT_STORMWORKS)
+            err = writemesh(m, outfile);
         fclose(outfile);
     }
 
 exit:
-    if (err) printf("Error #%d converting mesh %d\n", err, srcfile);
+    if (err) printf("Error #%d converting mesh %s\n", err, srcfile);
     freemesh(&m);
     return err;
-}
-
-mesh loadphys(char* fbytes) {
-
 }
 
 int main(int argc, char** argv) {
     char* out_filename_buf = malloc(1024 * sizeof(char));
     int res = 0;
 
-    int output_mode = OUTPUT_PLY;
+    int output_mode = OUTPUT_PLY, input_mode = INPUT_MESH;
 
     if (argc == 1) {
         printf("Error, input filename must be specified\n");
@@ -377,6 +478,8 @@ int main(int argc, char** argv) {
             output_mode = OUTPUT_OBJ;
         } else if (!strcmp(argv[argidx], "--ply")) {
             output_mode = OUTPUT_PLY;
+        } else if (!strcmp(argv[argidx], "--mesh") || !strcmp(argv[argidx], "--stormworks")) {
+            output_mode = OUTPUT_STORMWORKS;
         } else if (!strcmp(argv[argidx], "--plys") || !strcmp(argv[argidx], "--multiply")) {
             output_mode = OUTPUT_MULTI_PLY;
         } else if (!strcmp(argv[argidx], "--stdout")) {
@@ -396,7 +499,7 @@ int main(int argc, char** argv) {
     for (int i = argidx; i < argc; ++i) {
         memcpy(out_filename_buf, argv[i], strlen(argv[i]));
         chgfname(out_filename_buf, output_mode);
-        res = cvtmesh(argv[i], out_filename_buf, output_mode);
+        res = cvtmesh(argv[i], out_filename_buf, input_mode, output_mode);
         if (res != 0) {
             printf("Error %d converting file #%d\n", res, i - 1);
             break;
