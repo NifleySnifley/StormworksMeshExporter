@@ -1,3 +1,5 @@
 .vscode/
 *.mesh
+*.ply
+*.obj
 build/

@@ -13,7 +13,7 @@ BASE_DIR = sys.argv[1]
 
 
 def cvtdir(d):
-    files = [f for f in os.listdir(d) if f.endswith('.mesh')]
+    files = [f for f in os.listdir(d) if f.endswith('.phys')]
     directories = [f for f in os.listdir(d) if os.path.isdir(d + f)]
 
     for file in files:
