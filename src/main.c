@@ -6,12 +6,29 @@
 #include <stdint.h>
 #include <libgen.h>
 #include <windows.h>
+#include <unistd.h>
+#include <getopt.h>
+#include <time.h>
+#include <stdbool.h>
+#include <memory.h>
 
-const char* OUT_EXTS[4] = {
+#define TINYOBJ_LOADER_C_IMPLEMENTATION
+#include "tinyobjloader-c/tinyobj_loader_c.h"
+
+#define VERSION_STR "0.2"
+
+const char* HELPSTR = "StormworksMeshExporter v" VERSION_STR " made by Nifley <https://github.com/NifleySnifley>\n"
+"Usage:\t swmeshexp.exe [options] <input> [output]\n";
+
+char tmp_buf[1024];
+
+const char* OUT_EXTS[6] = {
     ".ply",
     ".obj",
     ".ply",
-    ".export.mesh"
+    ".export.mesh",
+    ".txt",
+    ""
 };
 
 enum OUTPUT_MODE {
@@ -23,14 +40,14 @@ enum OUTPUT_MODE {
     OUTPUT_NONE
 };
 
-const char* IN_EXTS[1] = {
+const char* IN_EXTS[2] = {
     ".mesh",
-    // ".obj"
+    ".obj"
 };
 
 enum INPUT_MODE {
     INPUT_MESH,
-    // INPUT_OBJ
+    INPUT_OBJ
 };
 
 const char* SIGNATURE = "mesh";
@@ -42,8 +59,14 @@ const char* SHADER_TYPES[4] = {
 };
 
 typedef struct vertex {
-    float x, y, z;
-    uint8_t r, g, b, a;
+    union {
+        struct { float x, y, z; };
+        float pos[3];
+    };
+    union {
+        struct { uint8_t r, g, b, a; };
+        uint8_t col[4];
+    };
     float nx, ny, nz;
 } vertex;
 
@@ -68,8 +91,16 @@ void freesubmesh(submesh* sm) {
     sm->id = NULL;
 }
 
+submesh copysubmesh(submesh sm) {
+    submesh s2 = sm;
+    s2.id = malloc(strlen(sm.id) + 1);
+    s2.id[strlen(sm.id)] = '\0';
+    strcpy(s2.id, sm.id);
+    return s2;
+}
+
 typedef struct mesh {
-    char* name;
+    // char* name;
     int n_vertices;
     vertex* vertices;
     int n_triangles;
@@ -77,6 +108,31 @@ typedef struct mesh {
     int n_submeshes;
     submesh* submeshes;
 } mesh;
+
+// Recalculates the bounding box of each submesh in `m` based on the vertices it contains
+void recalculate_submesh_bounds(mesh* m) {
+    submesh* sm;
+    for (int i = 0; i < m->n_submeshes; ++i) {
+        sm = &m->submeshes[i];
+        sm->cullmin[0] = m->vertices[sm->start_index].x;
+        sm->cullmin[1] = m->vertices[sm->start_index].y;
+        sm->cullmin[2] = m->vertices[sm->start_index].z;
+        sm->cullmax[0] = m->vertices[sm->start_index].x;
+        sm->cullmax[1] = m->vertices[sm->start_index].y;
+        sm->cullmax[2] = m->vertices[sm->start_index].z;
+
+        for (int j = 0; j < sm->vertex_count; ++j) {
+            int o = sm->start_index + j;
+            sm->cullmax[0] = max(m->vertices[o].x, sm->cullmax[0]);
+            sm->cullmax[1] = max(m->vertices[o].y, sm->cullmax[1]);
+            sm->cullmax[2] = max(m->vertices[o].z, sm->cullmax[2]);
+
+            sm->cullmin[0] = min(m->vertices[o].x, sm->cullmin[0]);
+            sm->cullmin[1] = min(m->vertices[o].y, sm->cullmin[1]);
+            sm->cullmin[2] = min(m->vertices[o].z, sm->cullmin[2]);
+        }
+    }
+}
 
 void freemesh(mesh* m) {
     free(m->vertices);
@@ -88,8 +144,50 @@ void freemesh(mesh* m) {
     m->submeshes = NULL;
 }
 
-int chgfname(char* name, int mode) {
-    memcpy(strstr(name, ".mesh"), OUT_EXTS[mode], strlen(OUT_EXTS[mode]) + 1);
+// Appends the entire contents of the second mesh to the other.
+// (All vertices, faces, and submeshes of `src` are added to an enlargened `dest`)
+// The second mesh is neither modified not deallocated.
+void concat_meshes(mesh* dest, mesh src) {
+    // Allocate enough space for merging
+    realloc(dest->vertices, sizeof(vertex) * (dest->n_vertices + src.n_vertices));
+    realloc(dest->triangles, sizeof(triangle) * (dest->n_triangles + src.n_triangles));
+    realloc(dest->submeshes, sizeof(submesh) * (dest->n_submeshes + src.n_submeshes));
+
+    // Copy over vertices
+    memcpy(&dest->vertices[dest->n_vertices], src.vertices, src.n_vertices * sizeof(vertex));
+
+    // Triangles must be modified
+    for (int i = 0; i < src.n_triangles; ++i) {
+        dest->triangles[dest->n_triangles + i] = (triangle){
+            .a = src.triangles[i].a + dest->n_triangles,
+            .b = src.triangles[i].b + dest->n_triangles,
+            .c = src.triangles[i].c + dest->n_triangles
+        };
+    }
+
+    for (int s = 0; s < src.n_submeshes; ++s) {
+        submesh sm = src.submeshes[s];
+        sm.start_index += dest->n_vertices;
+        dest->submeshes[dest->n_submeshes + s] = copysubmesh(sm); // Need to newly-allocate the ID
+    }
+
+    dest->n_submeshes += src.n_submeshes;
+    dest->n_triangles += src.n_triangles;
+    dest->n_vertices += src.n_vertices;
+}
+
+void chgfname(char* name, int modein, int modeout) {
+    memcpy(strstr(name, IN_EXTS[modein]), OUT_EXTS[modeout], strlen(OUT_EXTS[modeout]) + 1);
+}
+
+int replacechar(char* str, char orig, char rep) {
+    char* ix = str;
+    int n = 0;
+    while ((ix = strchr(ix, orig)) != NULL) {
+        *ix++ = rep;
+        n++;
+    }
+    return n;
 }
 
 char* readbytes(char* filename, size_t* len) {
@@ -107,9 +205,137 @@ char* readbytes(char* filename, size_t* len) {
     return buf;
 }
 
-// TODO: Assimp OBJ file reading
-mesh readobj(char* fbytes) {
+void tinyOBJ_loadFile(void* ctx, const char* filename, const int is_mtl, const char* obj_filename, char** buffer, size_t* len) {
+    *buffer = readbytes(filename, len);
+}
 
+// Set the color with the object name (like lew's SWMesh2XML)
+bool extract_color(char* obj_name, vertex* vtx) {
+    char* objn_cpy = malloc(strlen(obj_name) + 2);
+    strcpy(objn_cpy, obj_name);
+    char* slash = strstr(obj_name, "/");
+    if (slash == NULL) goto exit;
+
+    objn_cpy[(int)(slash - obj_name)] = '\0';
+
+    int dash_idx = 0, i = 0, start = 0;
+    for (i = 0; i < 4; ++i) {
+        if (dash_idx < 0) goto exit;
+        dash_idx = strstr(&obj_name[dash_idx + 1], "-") - obj_name;
+        if (dash_idx > 0) objn_cpy[dash_idx] = '\0';
+
+        vtx->col[i] = atoi(&objn_cpy[start]);
+
+        start = dash_idx + 1;
+    }
+
+exit:
+    free(objn_cpy);
+    return i == 4;
+}
+
+mesh readobj(char* filename, int* err) {
+    mesh m;
+    m.n_submeshes = 0;
+    m.n_vertices = 0;
+    m.n_triangles = 0;
+
+    tinyobj_attrib_t obj_attrs;
+    tinyobj_attrib_init(&obj_attrs);
+
+    size_t obj_n_shapes = 0;
+    tinyobj_shape_t* obj_shapes = NULL;
+    size_t obj_n_mtls = 0;
+    tinyobj_material_t* obj_mtls = NULL;
+
+    unsigned int flags = TINYOBJ_FLAG_TRIANGULATE;
+    *err = tinyobj_parse_obj(&obj_attrs, &obj_shapes, &obj_n_shapes, &obj_mtls, &obj_n_mtls, filename, tinyOBJ_loadFile, NULL, flags);
+    if (*err != TINYOBJ_SUCCESS) {
+        printf("tinyOBJ: Error parsing file %d\n", *err);
+        return m;
+    }
+
+    // TODO: Deal with non-triangulated (quad) meshes
+    // At least throw an intelligible error
+
+    printf("tinyOBJ: Successfully loaded OBJ file with %d materials and %d shapes\n", obj_n_mtls, obj_n_shapes);
+
+    // Allocate space in the mesh
+    m.n_triangles = obj_attrs.num_face_num_verts;
+    m.triangles = calloc(m.n_triangles, sizeof(triangle));
+    m.n_vertices = m.n_triangles * 3; // Vertices will be created during the processing of triangles
+    m.vertices = calloc(m.n_vertices, sizeof(vertex));
+    m.n_submeshes = obj_n_shapes;
+    m.submeshes = calloc(m.n_submeshes, sizeof(submesh));
+
+    for (int t = 0; t < m.n_triangles; ++t) {
+        for (int v = 0; v < 3; ++v) {
+            tinyobj_vertex_index_t face_vert = obj_attrs.faces[t * 3 + v];
+            m.vertices[t * 3 + v] = (vertex){
+                .x = obj_attrs.vertices[face_vert.v_idx * 3],
+                .y = obj_attrs.vertices[face_vert.v_idx * 3 + 1],
+                .z = obj_attrs.vertices[face_vert.v_idx * 3 + 2],
+                .nx = obj_attrs.normals[face_vert.vn_idx * 3],
+                .ny = obj_attrs.normals[face_vert.vn_idx * 3 + 1],
+                .nz = obj_attrs.normals[face_vert.vn_idx * 3 + 2],
+                .r = 0,
+                .g = 0,
+                .b = 0,
+                .a = 0
+            };
+        }
+
+        // Next three vertices
+        m.triangles[t] = (triangle){ .a = t * 3, .b = t * 3 + 1,.c = t * 3 + 2 };
+    }
+
+    // NOTE: If no materials are loaded, present, or match the OBJ file, try to parse color from the object name
+    for (int s = 0; s < obj_n_shapes; ++s) {
+        tinyobj_shape_t shape = obj_shapes[s];
+        // printf("OBJ shape %d \"%s\" starting at face %d with %d faces\n", s, shape.name, shape.face_offset, shape.length);
+        submesh sm;
+
+        sm.id = malloc(strlen(shape.name) + 1);
+        strcpy(sm.id, shape.name);
+        replacechar(sm.id, '\r', '\0');
+
+        sm.start_index = shape.face_offset * 3;
+        sm.vertex_count = shape.length * 3;
+        sm.shadertype = 0;
+
+        printf("%d\n", sm.vertex_count);
+        vertex col_vtx;
+        if (extract_color(sm.id, &col_vtx)) {
+            for (int i = 0; i < sm.vertex_count; ++i) {
+                m.vertices[i + sm.start_index].r = col_vtx.r;
+                m.vertices[i + sm.start_index].g = col_vtx.g;
+                m.vertices[i + sm.start_index].b = col_vtx.b;
+            }
+        }
+
+        // NOTE: TinyOBJ doesn't appear to have (working) support for MTL files yet?
+        // TODO: Proper MTL-based vertex coloring
+
+        // for (int i = 0; i < sm.vertex_count * 3; ++i) {
+        // int matidx = obj_attrs.material_ids[sm.start_index / 3];
+        // printf("face %d mtl %d\n", (i + sm.start_index) / 3, matidx);
+        // if (matidx < 0) continue;
+        // tinyobj_material_t mtl = obj_mtls[matidx];
+        // m.vertices[i + sm.start_index].r = (uint8_t)(mtl.diffuse[0] * 255.0f);
+        // m.vertices[i + sm.start_index].g = (uint8_t)(mtl.diffuse[1] * 255.0f);
+        // m.vertices[i + sm.start_index].b = (uint8_t)(mtl.diffuse[2] * 255.0f);
+        // }
+
+        m.submeshes[s] = sm;
+    }
+
+    recalculate_submesh_bounds(&m);
+
+exit:
+    tinyobj_attrib_free(&obj_attrs);
+    if (obj_mtls) tinyobj_materials_free(obj_mtls, obj_n_mtls);
+    if (obj_shapes) tinyobj_shapes_free(obj_shapes, obj_n_shapes);
+    return m;
 }
 
 // Writes `m`m to `destfd` in wavefront OBJ format
@@ -117,15 +343,15 @@ mesh readobj(char* fbytes) {
 int writeobj(mesh m, FILE* destfd) {
     FILE* obj = destfd;
 
-    fprintf(obj, "# Created by StormworksMeshExporter v0.1\no\n");
+    fprintf(obj, "# Created by StormworksMeshExporter v%s\no\n", VERSION_STR);
 
     // Write OBJ-formatted mesh
 
     // Vertices
     for (int v = 0; v < m.n_vertices; ++v) {
-        fprintf(obj, "v %f %f %f %f %f %f\n",
-            m.vertices[v].x, m.vertices[v].y, m.vertices[v].z,
-            (float)m.vertices[v].r / 255.0f, (float)m.vertices[v].g / 255.0f, (float)m.vertices[v].b / 255.0f
+        fprintf(obj, "v %f %f %f\n",
+            m.vertices[v].x, m.vertices[v].y, m.vertices[v].z
+            // (float)m.vertices[v].r / 255.0f, (float)m.vertices[v].g / 255.0f, (float)m.vertices[v].b / 255.0f
         );
     }
 
@@ -134,12 +360,16 @@ int writeobj(mesh m, FILE* destfd) {
         fprintf(obj, "vn %f %f %f\n", m.vertices[v].nx, m.vertices[v].ny, m.vertices[v].nz);
     }
 
+    for (int v = 0; v < m.n_vertices; ++v) {
+        fprintf(obj, "vt 0.0 0.0\n");
+    }
+
     // Triangles
     for (int t = 0; t < m.n_triangles; ++t) {
-        fprintf(obj, "f %d//%d %d//%d %d//%d\n",
-            m.triangles[t].b + 1, m.triangles[t].c + 1,
-            m.triangles[t].a + 1, m.triangles[t].b + 1,
-            m.triangles[t].c + 1, m.triangles[t].a + 1
+        fprintf(obj, "f %d/%d/%d %d/%d/%d %d/%d/%d\n",
+            m.triangles[t].b + 1, m.triangles[t].b + 1, m.triangles[t].b + 1,
+            m.triangles[t].a + 1, m.triangles[t].a + 1, m.triangles[t].a + 1,
+            m.triangles[t].c + 1, m.triangles[t].c + 1, m.triangles[t].c + 1
         );
     }
 
@@ -150,9 +380,9 @@ int writeobj(mesh m, FILE* destfd) {
 int writeply(mesh m, FILE* destfd) {
     FILE* ply = destfd;
 
-    fprintf(ply, "ply\nformat ascii 1.0\ncomment Created by StormworksMeshExporter v0.1\n");
-    fprintf(ply, "element vertex %d\nproperty float32 x\nproperty float32 y\nproperty float32 z\nproperty uchar red\nproperty uchar green\nproperty uchar blue\n", m.n_vertices);
-    fprintf(ply, "element face %d\nproperty list uint8 int32 vertex_indices\n", m.n_vertices);
+    fprintf(ply, "ply\nformat ascii 1.0\ncomment Created by StormworksMeshExporter v%s\n", VERSION_STR);
+    fprintf(ply, "element vertex %d\nproperty float x\nproperty float y\nproperty float z\nproperty uchar red\nproperty uchar green\nproperty uchar blue\n", m.n_vertices);
+    fprintf(ply, "element face %d\nproperty list uchar uint vertex_indices\n", m.n_triangles);
     fprintf(ply, "end_header\n");
     // Write PLY-formatted mesh
 
@@ -164,7 +394,7 @@ int writeply(mesh m, FILE* destfd) {
     // Triangles
     for (int t = 0; t < m.n_triangles; ++t) {
         fprintf(ply, "%d %d %d %d\n",
-            m.triangles[t].a,
+            3,
             m.triangles[t].b,
             m.triangles[t].c,
             m.triangles[t].a
@@ -222,17 +452,34 @@ int writestdout(mesh m) {
 }
 
 // TODO: Phys file import
-mesh loadphys(char* fbytes) {
+mesh readphys(char* fbytes) {
+    mesh m;
 
+    return m;
 }
 
 // TODO: Phys file export
 int writephys(mesh m, FILE* destfd) {
-
+    return 0;
 }
 
 // Loads the mesh data stored in `fbytes` (encoded in Stormworks .mesh format) 
-mesh loadmesh(char* fbytes) {
+mesh readmesh(char* filename, int* err) {
+    mesh m;
+    size_t len = 0;
+
+    char* fbytes = readbytes(filename, &len);
+    if (fbytes == NULL) {
+        *err = 1;
+        goto exit;
+    }
+
+    fbytes[4] = '\0';
+    // Incorrect signature
+    if (strcmp(fbytes, "mesh")) {
+        *err = 2;
+    }
+
     int cursor = 8; // skip the first 8 bytes "mesh" + 4 header
 
     // Vertex count
@@ -263,7 +510,6 @@ mesh loadmesh(char* fbytes) {
     cursor += 2;
     submesh* submeshes = malloc(submeshcount * sizeof(submesh));
 
-    // TODO: Submeshes
     for (int s = 0; s < submeshcount; ++s) {
         submesh sm;
         sm.start_index = *((uint32_t*)&fbytes[cursor]);
@@ -297,7 +543,6 @@ mesh loadmesh(char* fbytes) {
         submeshes[s] = sm;
     }
 
-    mesh m;
     m.n_vertices = vtxcount;
     m.vertices = verts;
     m.n_triangles = tricount;
@@ -305,6 +550,8 @@ mesh loadmesh(char* fbytes) {
     m.n_submeshes = submeshcount;
     m.submeshes = submeshes;
 
+exit:
+    if (fbytes != NULL) free(fbytes);
     return m;
 }
 
@@ -367,7 +614,7 @@ int writemesh(mesh m, FILE* destfd) {
         fwrite("\x00\x00\x80\x3F\x00\x00\x80\x3F\x00\x00\x80\x3F", 3, 4, destfd);
     }
 
-    fwrite("\x00\x00", 2, 1, destfd);
+    fwrite("\x00\x00 created with StormworksMeshExporter v" VERSION_STR, 2, 1, destfd);
 
     fflush(destfd);
 
@@ -375,22 +622,19 @@ int writemesh(mesh m, FILE* destfd) {
 }
 
 int cvtmesh(char* srcfile, char* destfile, int input_mode, int output_mode) {
-    char* meshbytes;
     int err = 0;
     mesh m;
     printf("Converting %s to %s\n", srcfile, destfile);
 
-    size_t len = 0;
-    meshbytes = readbytes(srcfile, &len);
-    if (meshbytes == NULL) {
-        err = 1;
-        goto exit;
+    if (input_mode == INPUT_MESH) {
+        m = readmesh(srcfile, &err);
+        if (err)
+            return err;
+    } else if (input_mode == INPUT_OBJ) {
+        m = readobj(srcfile, &err);
+        if (err)
+            return err;
     }
-
-    if (input_mode == INPUT_MESH)
-        m = loadmesh(meshbytes);
-    // else if (input_mode == INPUT_OBJ)
-    //     m = readobj(meshbytes);
 
     printf("Mesh loaded with %d vertices and %d faces\n", m.n_vertices, m.n_triangles);
 
@@ -458,60 +702,117 @@ exit:
     return err;
 }
 
+int processfile(char* input_filename, char* output_filename, int input_mode, int output_mode) {
+    // Auto generate output filename
+    if (output_filename == NULL) {
+        memcpy(tmp_buf, input_filename, strlen(input_filename));
+        chgfname(tmp_buf, input_mode, output_mode);
+        output_filename = tmp_buf;
+    }
+
+    clock_t start = clock();
+    int res = cvtmesh(input_filename, output_filename, input_mode, output_mode);
+    if (res != 0) {
+        printf("Error %d converting file \"%s\"\n", res, input_filename);
+        return res;
+    }
+
+    clock_t time = clock() - start;
+    printf("Success! (%ld ms)\n", time * 1000 / CLOCKS_PER_SEC);
+    return res;
+}
+
 int main(int argc, char** argv) {
-    char* out_filename_buf = malloc(1024 * sizeof(char));
     int res = 0;
 
     int output_mode = OUTPUT_PLY, input_mode = INPUT_MESH;
+    char* inpfile = NULL;
 
-    if (argc == 1) {
-        printf("Error, input filename must be specified\n");
-        res = 3;
-        goto exit;
+    // v0.2: More inputs
+    // DONE: Manual output file selection
+    // DONE: Multiple input/output (<infile> -o <outfile>) pairs?
+    // DONE: OBJ file reading (except vertex colors because tinyobj)
+    // TODO: Document all options & capabilities after proper CLI is done in HELPSTR
+    // TODO: Stormworks physics mesh IO
+
+    // v0.3: CLI QOL features
+    // TODO: Automatic input/output type detection if not manually set
+    // TODO: Directory mode: Searches input directory for all files matching input type and converts them to selected output type. if an output option is provided, use it as a directory to store the output files. recursive option
+    // TODO: Allow MISO (multiple-input-single-output) mesh converting with -i input file flags and specification of submesh data for each input (shader type, ID)
+
+    int opt;
+    while ((opt = getopt(argc, argv, "-:I:O:o:h")) != -1) {
+        switch (opt) {
+            case 'O':
+                if (!strcasecmp(optarg, "obj")) {
+                    output_mode = OUTPUT_OBJ;
+                } else if (!strcasecmp(optarg, "ply")) {
+                    output_mode = OUTPUT_PLY;
+                } else if (!strcasecmp(optarg, "mesh") || !strcasecmp(optarg, "stormworks")) {
+                    output_mode = OUTPUT_STORMWORKS;
+                } else if (!strcasecmp(optarg, "plys") || !strcasecmp(optarg, "multiply")) {
+                    output_mode = OUTPUT_MULTI_PLY;
+                } else if (!strcasecmp(optarg, "stdout")) {
+                    output_mode = OUTPUT_STDOUT;
+                } else if (!strcasecmp(optarg, "dryrun")) {
+                    output_mode = OUTPUT_NONE;
+                } else {
+                    printf("Error, invalid output type \"%s\", see help (-h) for valid options.\n", optarg);
+                    res = 5;
+                    goto exit;
+                }
+                break;
+            case 'I':
+                if (!strcasecmp(optarg, "obj")) {
+                    input_mode = INPUT_OBJ;
+                } else if (!strcasecmp(optarg, "mesh") || !strcasecmp(optarg, "stormworks")) {
+                    input_mode = INPUT_MESH;
+                } else {
+                    printf("Error, invalid input type \"%s\", see help (-h) for valid options.\n", optarg);
+                    res = 5;
+                    goto exit;
+                }
+                break;
+
+            case 1:
+                // If there is a file that hasn't been converted yet and no output has been given, convert it automatically.
+                if (inpfile != NULL) {
+                    processfile(inpfile, NULL, input_mode, output_mode);
+                    inpfile = NULL;
+                }
+                inpfile = optarg;
+                break;
+
+            case 'o': // When output name is given, convert the previous file
+                processfile(inpfile, optarg, input_mode, output_mode);
+                inpfile = NULL;
+                break;
+
+            case 'h':
+                printf("%s", HELPSTR);
+                goto exit;
+                break;
+            case '?': // Unknown arg
+                printf("Error, unknown argument \'%c\'\n", optopt);
+                res = 6;
+                goto exit;
+                break;
+            case ':': // No optarg
+                switch (optopt) {
+                    case 'O':
+                        printf("Error, output type must be specified after -O\n");
+                        break;
+                }
+                res = 7;
+                goto exit;
+                break;
+        }
     }
 
-    // Parse flags
-    int argidx = 1;
-    for (;argv[argidx][0] == '-'; argidx++) {
-        // printf("Flag %s\n", argv[argidx]);
-        if (!strcmp(argv[argidx], "--obj")) {
-            output_mode = OUTPUT_OBJ;
-        } else if (!strcmp(argv[argidx], "--ply")) {
-            output_mode = OUTPUT_PLY;
-        } else if (!strcmp(argv[argidx], "--mesh") || !strcmp(argv[argidx], "--stormworks")) {
-            output_mode = OUTPUT_STORMWORKS;
-        } else if (!strcmp(argv[argidx], "--plys") || !strcmp(argv[argidx], "--multiply")) {
-            output_mode = OUTPUT_MULTI_PLY;
-        } else if (!strcmp(argv[argidx], "--stdout")) {
-            output_mode = OUTPUT_STDOUT;
-        } else if (!strcmp(argv[argidx], "--dryrun")) {
-            output_mode = OUTPUT_PLY;
-        }
-
-        if (argidx == (argc - 1)) {
-            printf("Error, input filename must be specified\n");
-            res = 2;
-            goto exit;
-        }
-    }
-
-    // TODO: Allow custom output filenames with <infile> -o <outfile>
-    for (int i = argidx; i < argc; ++i) {
-        memcpy(out_filename_buf, argv[i], strlen(argv[i]));
-        chgfname(out_filename_buf, output_mode);
-        res = cvtmesh(argv[i], out_filename_buf, input_mode, output_mode);
-        if (res != 0) {
-            printf("Error %d converting file #%d\n", res, i - 1);
-            break;
-        }
-    }
+    // Process the last filename
+    if (inpfile != NULL)
+        processfile(inpfile, NULL, input_mode, output_mode);
 
 exit:
-    free(out_filename_buf);
-    if (res != 0) {
-        return res;
-    } else {
-        printf("converted %d file(s) successfully\n", argc - argidx);
-        return 0;
-    }
+    return res;
 }
