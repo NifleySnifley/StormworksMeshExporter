@@ -1,3 +1,6 @@
 [submodule "lib/tinyobjloader-c"]
 	path = lib/tinyobjloader-c
 	url = https://github.com/syoyo/tinyobjloader-c
+[submodule "lib/librply"]
+	path = lib/librply
+	url = https://github.com/lkiesow/librply

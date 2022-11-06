@@ -10,10 +10,11 @@
 			"request": "launch",
 			"program": "${workspaceFolder}/build/swmeshexp",
 			"args": [
-				"-Iobj",
-				"-Oply",
-				"./cube.obj",
-				"-o ./cube.ply"
+				// "-Iobj",
+				// "-Oply",
+				// "./cube.obj",
+				// "-o ./cube.ply",
+				"./component_window1x1.mesh"
 			],
 			"stopAtEntry": false,
 			"cwd": "${workspaceFolder}",
