@@ -476,7 +476,7 @@ static int plyreader_face_cb(p_ply_argument argument) {
     ply_get_argument_element(argument, NULL, &face_idx);
 
     if (value_index >= 0)
-        m->triangles[face_idx].i[value_index] = (uint16_t)ply_get_argument_value(argument);
+        m->triangles[face_idx].i[2 - value_index] = (uint16_t)ply_get_argument_value(argument);
 
     return 1;
 }
@@ -519,7 +519,7 @@ mesh readply(char* filename, int* err) {
     submesh sm;
     sm.shadertype = 0;
     sm.start_index = 0;
-    sm.vertex_count = m.n_vertices;
+    sm.vertex_count = m.n_triangles * 3;
     sm.id = basename(filename);
     m.submeshes[0] = sm;
 
@@ -577,7 +577,7 @@ int writedebug(mesh m, FILE* destfd) {
 
     fprintf(destfd, "%d COLORS\n", m.n_vertices);
     for (int v = 0; v < m.n_vertices; ++v) {
-        fprintf(destfd, "%d, %d, %d\n", m.vertices[v].r, m.vertices[v].g, m.vertices[v].b);
+        fprintf(destfd, "%d, %d, %d, %d\n", m.vertices[v].r, m.vertices[v].g, m.vertices[v].b, m.vertices[v].a);
     }
 
     fprintf(destfd, "%d TRIANGLES\n", m.n_triangles);
@@ -743,6 +743,7 @@ int writemesh(mesh m, FILE* destfd) {
         fwrite(&sm.start_index, 1, sizeof(uint32_t), destfd);
 
         // Vertices count (4b)
+        // uint32_t vct = sm.vertex_count * 3;
         fwrite(&sm.vertex_count, 1, sizeof(uint32_t), destfd);
 
         // Unknown (2b)
@@ -775,141 +776,6 @@ int writemesh(mesh m, FILE* destfd) {
 
     return 0;
 }
-
-// int cvtmesh(char* srcfile, char* destfile, int input_mode, int output_mode, bool consoleout) {
-//     int err = 0;
-//     mesh m;
-
-//     if (!consoleout)
-//         printf("Converting %s to %s\n", srcfile, destfile);
-
-//     // if (input_mode == INPUT_MESH) {
-//     //     m = readmesh(srcfile, &err);
-//     //     if (err)
-//     //         return err;
-//     // } else if (input_mode == INPUT_OBJ) {
-//     //     m = readobj(srcfile, &err);
-//     //     if (err)
-//     //         return err;
-//     // } else if (input_mode == INPUT_PLY) {
-//     //     m = readply(srcfile, &err);
-//     //     if (err)
-//     //         return err;
-//     // }
-
-//     switch (input_mode) {
-//         case INPUT_MESH:
-//             m = readmesh(srcfile, &err);
-//             break;
-//         case INPUT_OBJ:
-//             m = readobj(srcfile, &err);
-//             break;
-//         case INPUT_PLY:
-//             m = readply(srcfile, &err);
-//             break;
-//     }
-
-//     printf("Mesh loaded with %d vertices and %d faces\n", m.n_vertices, m.n_triangles);
-
-//     for (int i = 0; i < m.n_submeshes; ++i) {
-//         printf(
-//             "Submesh \"%s\" starting at face %d containing %d faces using shader #%d (%s)\n",
-//             m.submeshes[i].id,
-//             m.submeshes[i].start_index / 3,
-//             m.submeshes[i].vertex_count / 3,
-//             m.submeshes[i].shadertype,
-//             SHADER_TYPES[m.submeshes[i].shadertype]
-//         );
-//     }
-
-//     if (output_mode == OUTPUT_MULTI_PLY) {
-//         char* outdir = malloc(128);
-//         memcpy(outdir, destfile, strlen(destfile) + 1);
-//         outdir[strlen(outdir) - 4] = '\0';
-
-//         CreateDirectory(outdir, NULL);
-
-//         char* buf = malloc(128);
-
-//         for (int s = 0; s < m.n_submeshes; ++s) {
-//             submesh sm = m.submeshes[s];
-//             strcpy(buf, outdir);
-//             snprintf(buf, 128, "%s/%s-%s.ply", outdir, sm.id, SHADER_TYPES[sm.shadertype]);
-
-//             mesh sub;
-
-//             sub.vertices = m.vertices;
-//             sub.n_vertices = m.n_vertices;
-
-//             sub.triangles = &m.triangles[sm.start_index / 3];
-//             sub.n_triangles = sm.vertex_count / 3;
-
-//             FILE* outfile = fopen(buf, "w");
-//             writeply(sub, outfile);
-//             fclose(outfile);
-//         }
-
-//         free(buf);
-//         free(outdir);
-//     } else if (output_mode == OUTPUT_NONE) {
-//         // Do nothing!
-//     } else {
-//         FILE* outfile;
-//         if (consoleout) {
-//             outfile = stdout;
-//         } else {
-//             outfile = fopen(destfile, output_mode == OUTPUT_STORMWORKS ? "wb" : "w");
-//             if (outfile == NULL) {
-//                 err = 2;
-//                 goto exit;
-//             }
-//         }
-
-//         switch (output_mode) {
-//             case OUTPUT_PLY:
-//                 err = writeply(m, outfile);
-//                 break;
-//             case OUTPUT_OBJ:
-//                 err = writeobj(m, outfile);
-//                 break;
-//             case OUTPUT_STORMWORKS:
-//                 err = writemesh(m, outfile);
-//                 break;
-//             case OUTPUT_TEXT:
-//                 err = writedebug(m, outfile);
-//                 break;
-//             default:
-//                 break;
-//         }
-
-//         fclose(outfile);
-//     }
-
-// exit:
-//     if (err) printf("Error #%d converting mesh %s\n", err, srcfile);
-//     freemesh(&m);
-//     return err;
-// }
-
-// int processfile(char* input_filename, char* output_filename, int input_mode, int output_mode, bool cout) {
-//     // Auto generate output filename
-//     if (output_filename == NULL) {
-//         memcpy(tmp_buf, input_filename, strlen(input_filename));
-//         chgfname(tmp_buf, input_mode, output_mode);
-//         output_filename = tmp_buf;
-//     }
-
-//     clock_t start = clock();
-//     int res = cvtmesh(input_filename, output_filename, input_mode, output_mode, cout);
-//     if (res != 0) {
-//         printf("Error %d converting file \"%s\"\n", res, input_filename);
-//         return res;
-//     }
-
-//     clock_t time = clock() - start;
-//     printf("Success! (%ld ms)\n", time * 1000 / CLOCKS_PER_SEC);
-//     return res;
-// }
 
 // Step 1: Import a mesh
 int importfile(char* input_filename, int input_mode, mesh* m) {
@@ -1054,6 +920,7 @@ int main(int argc, char** argv) {
     // DONE: OBJ export submeshes and shader types in object names
     // NOTE: Refactored for a more "pipelined" import->process->export flow to allow more mesh operations in the future.
     // TODO: Stormworks physics mesh IO
+    // TODO: Warning/error when exporting .mesh with too many vertices, too large of parameters, etc.
 
     // v0.3: CLI QOL features & advanced operations
     // TODO: .mesh export shader selection
@@ -1061,7 +928,7 @@ int main(int argc, char** argv) {
     // TODO: Directory mode: Searches input directory for all files matching input type and converts them to selected output type. if an output option is provided, use it as a directory to store the output files. recursive option
     // TODO: Allow MISO (multiple-input-single-output) mesh converting with -i input file flags and specification of submesh data for each input (shader type, etc.)
     // TODO: ^ Multi-PLY folder input 
-    // TODO: ^ add 'operations' more flags! (merge, select submesh [by ID or name], set shader, offset?)
+    // TODO: ^ add 'operations' more flags! (merge, select submesh [by ID or name], swap axes, set shader, offset?)
 
     int opt;
     while ((opt = getopt(argc, argv, "-:I:O:S:o:hC")) != -1) {
