@@ -418,8 +418,8 @@ int writeobj(mesh m, FILE* destfd) {
         fprintf(obj, "o %s (%d)\n", sm.id, sm.shadertype);
         for (int t = sm.start_index / 3; t < (sm.vertex_count + sm.start_index) / 3; ++t) {
             fprintf(obj, "f %d/%d/%d %d/%d/%d %d/%d/%d\n",
-                m.triangles[t].b + 1, m.triangles[t].b + 1, m.triangles[t].b + 1,
                 m.triangles[t].a + 1, m.triangles[t].a + 1, m.triangles[t].a + 1,
+                m.triangles[t].b + 1, m.triangles[t].b + 1, m.triangles[t].b + 1,
                 m.triangles[t].c + 1, m.triangles[t].c + 1, m.triangles[t].c + 1
             );
         }
@@ -476,7 +476,7 @@ static int plyreader_face_cb(p_ply_argument argument) {
     ply_get_argument_element(argument, NULL, &face_idx);
 
     if (value_index >= 0)
-        m->triangles[face_idx].i[2 - value_index] = (uint16_t)ply_get_argument_value(argument);
+        m->triangles[face_idx].i[value_index] = (uint16_t)ply_get_argument_value(argument);
 
     return 1;
 }
@@ -900,6 +900,36 @@ exit:
     return err;
 }
 
+int swapaxes(mesh* m, char* argument) {
+    if (strlen(argument) != 2) {
+        printf("Error swapping axes: exactly 2 axes must be provided\n");
+        return 1;
+    }
+
+    int axis1 = argument[0] - 'X';
+    int axis2 = argument[1] - 'X';
+
+    if (((axis1 < 0) || (axis1 > 2)) || ((axis2 < 0) || (axis2 > 2))) {
+        printf("Error swapping axes: invalid axes to swap \'%c\' and \'%c\'", argument[0], argument[1]);
+        return 2;
+    }
+
+    float tmp = 0;
+    for (int i = 0; i < m->n_vertices; ++i) {
+        tmp = m->vertices[i].pos[axis1];
+        m->vertices[i].pos[axis1] = m->vertices[i].pos[axis2];
+        m->vertices[i].pos[axis2] = tmp;
+
+        tmp = m->vertices[i].norm[axis1];
+        m->vertices[i].norm[axis1] = m->vertices[i].norm[axis2];
+        m->vertices[i].norm[axis2] = tmp;
+    }
+
+    printf("Successfully swapped %c and %c axes.\n", axis1 + 'X', axis2 + 'X');
+
+    return 0;
+}
+
 int main(int argc, char** argv) {
     int res = 0;
 
@@ -931,7 +961,7 @@ int main(int argc, char** argv) {
     // TODO: ^ add 'operations' more flags! (merge, select submesh [by ID or name], swap axes, set shader, offset?)
 
     int opt;
-    while ((opt = getopt(argc, argv, "-:I:O:S:o:hC")) != -1) {
+    while ((opt = getopt(argc, argv, "-:I:O:S:o:A:hC")) != -1) {
         switch (opt) {
             case 'O':
                 if (!strcasecmp(optarg, "obj")) {
@@ -970,6 +1000,15 @@ int main(int argc, char** argv) {
                 break;
 
             case 'S': // Submesh shader override
+                break;
+
+            case 'A': // Swap axes
+                if (!hasmesh) {
+                    printf("WARNING: Mesh not present to swap axes, skipping.\n");
+                } else {
+                    res = swapaxes(&m, optarg);
+                    if (res) goto exit;
+                }
                 break;
 
             case 1:
